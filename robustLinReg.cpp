@@ -22,21 +22,19 @@ public:
   arma::Mat<double> Z;
   arma::Col<double> Zdiag;
   int numWeights;
-  double evRecLambdaScale;
-  double evRecLambda;
-  double EB;
-  double B;
+  double evRecLambdaScale,evRecLambda;
+  double EB,B;
   
-  void construct(arma::Mat<double> X, arma::Mat<double> testX,
-                 double lambdaStart, double priorVal) {
+  void construct(arma::Mat<double> X,arma::Mat<double> testX,
+                 double lambdaStart,double priorVal) {
     features = X;
     testFeatures = testX;
     numWeights = features.n_cols;
     evBeta = arma::zeros(numWeights);
-    covBeta = arma::zeros(numWeights, numWeights);
+    covBeta = arma::zeros(numWeights,numWeights);
     arma::svd_econ(U,D,V,features);
     tV = arma::trans(V);
-    Z = arma::eye(D.n_elem, D.n_elem);
+    Z = arma::eye(D.n_elem,D.n_elem);
     Zdiag = arma::vec(D.n_elem);
     XTX = trans(features)*features;
     evRecLambda = lambdaStart;
@@ -47,9 +45,13 @@ public:
 
 // [[Rcpp::export]]
 // Group Level Priors Fast Linear Regression
-List robustLinReg(List X, NumericVector Y, List testX, NumericVector testY,
-                  int maxIter, int numCycles, int intervalToPrint,
-                  List lambdaStartVec, double A, List B, double tol) {
+// Allows for separate neuroimaging task contrasts with separate
+// global shrinkage parameters for each feature set
+// Assumes independence between the sets of regression coefficients
+// corresponding to different feature sets in the q density
+List robustLinReg(List X,NumericVector Y,List testX,NumericVector testY,
+                  int maxIter,int numCycles,int intervalToPrint,
+                  List lambdaStartVec,double A,List B,double tol) {
   
   featureSet feat[X.size()];
   for (int i = 0; i < X.size(); i++) {
@@ -59,11 +61,12 @@ List robustLinReg(List X, NumericVector Y, List testX, NumericVector testY,
   arma::Col<double> response = as<arma::vec>(Y);
   arma::Col<double> testResponse = as<arma::vec>(testY);
   int n = feat[0].features.n_rows;
+  int testN = feat[0].testFeatures.n_rows;
   
-  // Calculate MSE
+  // calculate MSE
   arma::Col<double> testPred;
   arma::Col<double> trainResiduals = arma::vec(n);
-  arma::Col<double> testResiduals = arma::vec(n);
+  arma::Col<double> testResiduals = arma::vec(testN);
   double testR2;
   double trainMSE;
   double testMSE;
@@ -75,15 +78,15 @@ List robustLinReg(List X, NumericVector Y, List testX, NumericVector testY,
   double evRecRegVarDenom;
   
   for (int iter = 1; iter < maxIter; iter++) {
-    // Calculate covariance matrices
+    // calculate covariance matrices
     for (int i = 0; i < X.size(); i++) {
-      feat[i].Zdiag = pow(evRecRegVar*pow(feat[i].D, 2.0)
-                            + evRecRegVar*feat[i].evRecLambda, -1.0);
+      feat[i].Zdiag = pow(evRecRegVar*pow(feat[i].D,2.0)
+                            + evRecRegVar*feat[i].evRecLambda,-1.0);
       feat[i].Z.diag() = feat[i].Zdiag;
       feat[i].covBeta = feat[i].V*feat[i].Z*feat[i].tV;
     }
     
-    // Cycle through regression coefficient updates
+    // cycle through regression coefficient updates
     for (int i = 0; i < numCycles; i++) {
       for (int j = 0; j < X.size(); j++) {
         trainResiduals = response;
@@ -95,20 +98,21 @@ List robustLinReg(List X, NumericVector Y, List testX, NumericVector testY,
       } 
     }
     
-    // Update global shrinkage parameters and regression variance
+    // update global shrinkage parameters
     for (int i = 0; i < X.size(); i++) {
       feat[i].EB = arma::as_scalar(trans(feat[i].evBeta)*feat[i].evBeta
                                      + arma::trace(feat[i].covBeta));
-      feat[i].evRecLambdaScale = 1.0/(feat[i].evRecLambda + pow(feat[i].B, -2.0));
+      feat[i].evRecLambdaScale = 1.0/(feat[i].evRecLambda + pow(feat[i].B,-2.0));
       feat[i].evRecLambda = (feat[i].numWeights + 1.0)/arma::as_scalar(2.0*feat[i].evRecLambdaScale
                                                                          + evRecRegVar*feat[i].EB);
     }
     
+    // update inverse regression variance
     trainResiduals = response;
     for (int i = 0; i < X.size(); i++) {
       trainResiduals = trainResiduals - feat[i].features*feat[i].evBeta;
     }
-    evRecRegVarScale = 1.0/(evRecRegVar + pow(A, -2.0));
+    evRecRegVarScale = 1.0/(evRecRegVar + pow(A,-2.0));
     evRecRegVarNum = n + 1.0;
     evRecRegVarDenom = 2.0*evRecRegVarScale + arma::dot(trainResiduals,trainResiduals);
     for (int i = 0; i < X.size(); i++) {
@@ -117,6 +121,8 @@ List robustLinReg(List X, NumericVector Y, List testX, NumericVector testY,
       + arma::trace(feat[i].XTX*feat[i].covBeta);
     }
     evRecRegVar = evRecRegVarNum/evRecRegVarDenom;
+    
+    // calculate MSE statistics to assess convergence
     if (iter % intervalToPrint == 0) {
       testPred = feat[0].testFeatures*feat[0].evBeta;
       for (int i = 1; i < X.size(); i++) {
@@ -125,7 +131,7 @@ List robustLinReg(List X, NumericVector Y, List testX, NumericVector testY,
       testResiduals = testResponse - testPred;
       trainMSE = mean(square(trainResiduals));
       testMSE = mean(square(testResiduals));
-      testR2 = arma::as_scalar(pow(arma::cor(testResponse,testPred), 2.0));
+      testR2 = arma::as_scalar(pow(arma::cor(testResponse,testPred),2.0));
       Rcout << "Iter: " << iter
             << ", Train MSE: " << trainMSE
             << ", Test MSE: " << testMSE
@@ -138,23 +144,27 @@ List robustLinReg(List X, NumericVector Y, List testX, NumericVector testY,
     }
   }
   
+  // calculate MSE statistics using converged model
   testPred = feat[0].testFeatures*feat[0].evBeta;
   for (int i = 1; i < X.size(); i++) {
     testPred = testPred + feat[i].testFeatures*feat[i].evBeta;
   }
   testResiduals = testResponse - testPred;
   testMSE = mean(square(testResiduals));
-  testR2 = arma::as_scalar(pow(arma::cor(testResponse,testPred), 2.0));
+  testR2 = arma::as_scalar(pow(arma::cor(testResponse,testPred),2.0));
   
+  // calculate regression variance using converged model
+  // CAVI updates only use inverse regression variance so we need to calculate
+  // untransformed regression variance with the final model
   double evRegVarNum = 2.0*evRecRegVarScale + arma::dot(trainResiduals,trainResiduals);
   double evRegVarDenom = n;
   for (int i = 0; i < X.size(); i++) {
     evRegVarNum = evRegVarNum + feat[i].evRecLambda*feat[i].EB
-    + arma::trace(trans(feat[i].features)*feat[i].features*feat[i].covBeta);
+                + arma::trace(trans(feat[i].features)*feat[i].features*feat[i].covBeta);
     evRegVarDenom = evRegVarDenom + feat[i].numWeights;
     
   }
-  double evRegVar = evRecRegVarNum/evRecRegVarDenom;
+  double evRegVar = evRegVarNum/evRegVarDenom;
   
   return Rcpp::List::create(Named("evRegVar") = evRegVar,
                             Named("testMSE") = testMSE,
